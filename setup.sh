@@ -14,27 +14,6 @@ echo
 echo "=== Requesting configuration data ==="
 echo
 
-read -p "Timezone (default: Europe/London): " TZONE
-TZONE=${TZONE:-'Europe/London'}
-
-read -p "Email address for sysadmin (e.g. j.bloggs@example.com): " EMAIL
-
-read -p "Port for SSH login (default: 22): " SSHPORT
-SSHPORT=${SSHPORT:-22}
-
-echo
-
-read -p "Login username: " LOGINUSERNAME
-while true; do
-  read -s -p "Login password (must be STRONG!): " LOGINPASSWORD
-  echo
-  read -s -p "Confirm login password: " LOGINPASSWORD2
-  echo
-  [ "$LOGINPASSWORD" = "$LOGINPASSWORD2" ] && break
-  echo "Passwords didn't match -- please try again"
-done
-echo
-
 echo "** Hostname for VPN must ALREADY resolve to this machine, to enable Let's Encrypt certificate setup** "
 read -p "Hostname for VPN (e.g. vpn.example.com): " VPNHOST
 
@@ -48,7 +27,7 @@ echo
 echo "Passwords didn't match -- please try again"
 done
 
-VPNIPPOOL="10.10.10.0/24"
+VPNIPPOOL="10.9.8.0/24"
 
 
 echo
@@ -58,10 +37,7 @@ echo
 export DEBIAN_FRONTEND=noninteractive
 apt-get update && apt-get upgrade -y
 
-debconf-set-selections <<< "postfix postfix/mailname string ${VPNHOST}"
-debconf-set-selections <<< "postfix postfix/main_mailer_type string 'Internet Site'"
-
-apt-get install -y language-pack-en strongswan strongswan-plugin-eap-mschapv2 moreutils iptables-persistent postfix mailutils unattended-upgrades certbot
+apt-get install -y language-pack-en strongswan strongswan-plugin-eap-mschapv2 moreutils iptables-persistent certbot
 
 
 ETH0ORSIMILAR=$(ip route get 8.8.8.8 | awk -- '{printf $5}')
@@ -100,12 +76,10 @@ iptables -A INPUT -i lo -j ACCEPT
 # drop invalid packets
 iptables -A INPUT -m state --state INVALID -j DROP
 
-# rate-limit repeated new requests from same IP to any ports
-iptables -I INPUT -i $ETH0ORSIMILAR -m state --state NEW -m recent --set
-iptables -I INPUT -i $ETH0ORSIMILAR -m state --state NEW -m recent --update --seconds 60 --hitcount 12 -j DROP
-
-# accept (non-standard) SSH
-iptables -A INPUT -p tcp --dport $SSHPORT -j ACCEPT
+# accept SSH
+iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+# accept shadowsocks
+iptables -A INPUT -p tcp --dport 8388 -j ACCEPT
 
 
 # VPN
@@ -217,71 +191,6 @@ ${VPNUSERNAME} %any : EAP \""${VPNPASSWORD}"\"
 " > /etc/ipsec.secrets
 
 ipsec restart
-
-
-
-echo
-echo "=== User ==="
-echo
-
-# user + SSH
-
-adduser --disabled-password --gecos "" $LOGINUSERNAME
-echo "${LOGINUSERNAME}:${LOGINPASSWORD}" | chpasswd
-adduser ${LOGINUSERNAME} sudo
-
-sed -r \
--e "s/^Port 22$/Port ${SSHPORT}/" \
--e 's/^LoginGraceTime 120$/LoginGraceTime 30/' \
--e 's/^PermitRootLogin yes$/PermitRootLogin no/' \
--e 's/^X11Forwarding yes$/X11Forwarding no/' \
--e 's/^UsePAM yes$/UsePAM no/' \
--i.original /etc/ssh/sshd_config
-
-echo "
-MaxStartups 1
-MaxAuthTries 2
-UseDNS no" >> /etc/ssh/sshd_config
-
-service ssh restart
-
-
-echo
-echo "=== Timezone, mail, unattended upgrades ==="
-echo
-
-timedatectl set-timezone $TZONE
-/usr/sbin/update-locale LANG=en_GB.UTF-8
-
-
-sed -r \
--e "s/^myhostname =.*$/myhostname = ${VPNHOST}/" \
--e 's/^inet_interfaces =.*$/inet_interfaces = loopback-only/' \
--i.original /etc/postfix/main.cf
-
-echo "root: ${EMAIL}
-${LOGINUSERNAME}: ${EMAIL}
-" >> /etc/aliases
-
-newaliases
-service postfix restart
-
-
-sed -r \
--e 's|^//\s*"\$\{distro_id\}:\$\{distro_codename\}-updates";$|//        "${distro_id}:${distro_codename}-updates";|' \
--e 's|^//Unattended-Upgrade::MinimalSteps "true";$|Unattended-Upgrade::MinimalSteps "true";|' \
--e 's|^//Unattended-Upgrade::Mail "root";$|Unattended-Upgrade::Mail "root";|' \
--e 's|^//Unattended-Upgrade::Automatic-Reboot "false";$|Unattended-Upgrade::Automatic-Reboot "true";|' \
--e 's|^//Unattended-Upgrade::Automatic-Reboot-Time "02:00";$|Unattended-Upgrade::Automatic-Reboot-Time "03:00";|' \
--i /etc/apt/apt.conf.d/50unattended-upgrades
-
-echo 'APT::Periodic::Update-Package-Lists "1";
-APT::Periodic::Download-Upgradeable-Packages "1";
-APT::Periodic::AutocleanInterval "7";
-APT::Periodic::Unattended-Upgrade "1";
-' > /etc/apt/apt.conf.d/10periodic
-
-service unattended-upgrades restart
 
 
 echo
@@ -396,9 +305,6 @@ echo "<?xml version='1.0' encoding='UTF-8'?>
 </dict>
 </plist>
 " > vpn.mobileconfig
-
-echo 'Your IKEv2 VPN configuration profile for iOS and macOS is attached. Please double-click to install. You will need your device PIN or password, plus your VPN username and password.
-' | mail -s "VPN configuration profile" -A vpn.mobileconfig $EMAIL
 
 
 # necessary for IKEv2?
